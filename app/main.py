@@ -37,7 +37,9 @@ def create_app(store: Store | None = None) -> FastAPI:
             "Rehearse migrating tunnels onto new paths before touching production. "
             "Submit a directed topology, 2-10 tunnels and each tunnel's current and "
             "target path; the service returns a rehearsal id and a fully feasible "
-            "migration order, or refuses to start one."
+            "migration order, or refuses to start one. Backup paths can be "
+            "registered per rehearsal: every backup submission and every confirmed "
+            "switch is checked against each single-link outage before it is saved."
         ),
         lifespan=lifespan,
     )
@@ -46,9 +48,10 @@ def create_app(store: Store | None = None) -> FastAPI:
     @app.exception_handler(RehearsalError)
     async def _domain_error(_: Request, exc: RehearsalError) -> JSONResponse:
         body: dict = {"error": exc.code, "detail": str(exc)}
-        errors = getattr(exc, "errors", None)
-        if errors is not None:
-            body["errors"] = errors
+        for key in ("errors", "failures"):
+            value = getattr(exc, key, None)
+            if value is not None:
+                body[key] = value
         return JSONResponse(status_code=exc.status_code, content=body)
 
     app.include_router(router)

@@ -32,14 +32,16 @@ from datetime import datetime, timezone
 
 from .domain import RehearsalRecord, ReservationRecord, TunnelRecord
 from .errors import (
+    FailoverUnsafe,
     Infeasible,
     RehearsalNotFound,
     ReservationInvalid,
     StepConflict,
 )
+from .failover import find_failover_problems
 from .planner import explain_infeasible, find_order
 from .store import Store, StoreConflict
-from .validation import build_scenario
+from .validation import build_scenario, validate_backups
 
 MAX_WRITE_RETRIES = 5
 
@@ -100,6 +102,48 @@ class Engine:
             for link_id in tunnel.active_path:
                 used[link_id] += tunnel.bandwidth
         return used
+
+    @staticmethod
+    def _check_failover(
+        record: RehearsalRecord, active_paths: dict[str, tuple[str, ...]]
+    ) -> None:
+        """Replay every single-link outage against the would-be live state.
+
+        Unconfirmed reservations are treated as withdrawn, so only live and
+        backup paths load the surviving links.  Raises before anything is
+        committed when a tunnel would lose its backup or a surviving link
+        would be overloaded.
+        """
+        problems = find_failover_problems(
+            record.links, record.tunnels, active_paths, record.backups
+        )
+        if problems:
+            raise FailoverUnsafe(problems)
+
+    # ---------------------------------------------------------------- backups
+    def set_backups(self, rehearsal_id: str, entries) -> RehearsalRecord:
+        """Replace the whole backup set (empty submission clears it).
+
+        The new set is validated and simulated against the live paths before
+        anything is saved; a rejected submission changes nothing.
+        """
+        for _ in range(MAX_WRITE_RETRIES):
+            with self._lock:
+                record, version = self._load(rehearsal_id)
+                backups = validate_backups(record.links, record.tunnels, entries)
+                active = {t.tunnel_id: t.active_path for t in record.tunnels}
+                problems = find_failover_problems(
+                    record.links, record.tunnels, active, backups
+                )
+                if problems:
+                    raise FailoverUnsafe(problems)
+                record.backups = backups
+                try:
+                    self._store.replace(rehearsal_id, version, record.to_document())
+                except StoreConflict:
+                    continue
+                return record
+        raise StepConflict("the rehearsal is being modified concurrently; retry the request")
 
     @staticmethod
     def _pending_reservation(record: RehearsalRecord) -> ReservationRecord | None:
@@ -177,6 +221,17 @@ class Engine:
                 if tunnel is None:  # pragma: no cover - validated at creation
                     raise ReservationInvalid("reservation references an unknown tunnel")
                 self._check_reservable(record, tunnel)
+
+                # The switch must also survive every single-link outage with
+                # the registered backups; if not, the reservation stays
+                # pending and can still be cancelled with its original id.
+                active = {
+                    t.tunnel_id: (
+                        t.target_path if t.tunnel_id == tunnel.tunnel_id else t.active_path
+                    )
+                    for t in record.tunnels
+                }
+                self._check_failover(record, active)
 
                 updated = TunnelRecord(
                     tunnel_id=tunnel.tunnel_id,

@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .domain import LinkRecord, TunnelRecord
-from .errors import ScenarioError
+from .errors import BackupInvalid, BackupUnsupported, ScenarioError
 
 MIN_TUNNELS = 2
 MAX_TUNNELS = 10
@@ -139,3 +139,85 @@ def build_scenario(link_specs, tunnel_specs) -> Scenario:
         raise ScenarioError(errors)
 
     return Scenario(links=tuple(links), tunnels=tuple(tunnels))
+
+
+def validate_backups(
+    links: tuple[LinkRecord, ...],
+    tunnels: tuple[TunnelRecord, ...],
+    entries,
+) -> dict[str, tuple[str, ...]]:
+    """Validate a whole-group backup submission against the live paths.
+
+    ``entries`` are request models with ``tunnel_id`` and ``path``.  Returns
+    the replacement backup map (tunnel id -> ordered link ids).  An empty
+    submission clears the set and is always accepted.  Structural problems
+    raise :class:`BackupInvalid`; rehearsals whose links lack endpoints raise
+    :class:`BackupUnsupported` because contiguity cannot be checked there.
+    """
+    if not entries:
+        return {}
+    if not links or not all(link.has_endpoints for link in links):
+        raise BackupUnsupported(
+            "backup paths require every link to declare source and target; "
+            "this rehearsal was submitted without full link endpoints"
+        )
+
+    by_id = {link.link_id: link for link in links}
+    tunnel_by_id = {tunnel.tunnel_id: tunnel for tunnel in tunnels}
+    errors: list[str] = []
+    backups: dict[str, tuple[str, ...]] = {}
+    for i, entry in enumerate(entries):
+        where = f"backups[{i}] ({entry.tunnel_id!r})"
+        if entry.tunnel_id in backups:
+            errors.append(f"{where}: duplicate backup for tunnel {entry.tunnel_id!r}")
+            continue
+        tunnel = tunnel_by_id.get(entry.tunnel_id)
+        if tunnel is None:
+            errors.append(f"{where}: unknown tunnel {entry.tunnel_id!r}")
+            continue
+        path = tuple(entry.path)
+        if not path:
+            errors.append(f"{where}: the backup path needs at least one link")
+            continue
+
+        ok = True
+        for position, link_id in enumerate(path):
+            if link_id not in by_id:
+                errors.append(f"{where}.path: unknown link {link_id!r} at position {position}")
+                ok = False
+        if not ok:
+            continue
+        if len(set(path)) != len(path):
+            errors.append(f"{where}.path: a link appears more than once")
+            ok = False
+        for previous, current in zip(path, path[1:]):
+            if by_id[previous].target != by_id[current].source:
+                errors.append(
+                    f"{where}.path: link {previous!r} ends at "
+                    f"{by_id[previous].target!r} but {current!r} starts at "
+                    f"{by_id[current].source!r}; the backup path is not contiguous"
+                )
+                ok = False
+        # The backup must span the same endpoints as the path carrying
+        # traffic now (current and target paths share endpoints, so either
+        # side of a pending migration agrees).
+        active = tunnel.active_path
+        start, end = by_id[active[0]].source, by_id[active[-1]].target
+        if by_id[path[0]].source != start:
+            errors.append(
+                f"{where}.path: the backup starts at {by_id[path[0]].source!r} "
+                f"but the live path starts at {start!r}; endpoints must match"
+            )
+            ok = False
+        if by_id[path[-1]].target != end:
+            errors.append(
+                f"{where}.path: the backup ends at {by_id[path[-1]].target!r} "
+                f"but the live path ends at {end!r}; endpoints must match"
+            )
+            ok = False
+        if ok:
+            backups[entry.tunnel_id] = path
+
+    if errors:
+        raise BackupInvalid(errors)
+    return backups

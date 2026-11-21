@@ -1,0 +1,6 @@
+{
+  "backups": [
+    {"tunnel_id": "T1", "path": ["L4"]},
+    {"tunnel_id": "T2", "path": ["L4"]}
+  ]
+}

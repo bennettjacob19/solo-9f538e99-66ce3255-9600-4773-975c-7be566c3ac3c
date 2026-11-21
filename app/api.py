@@ -6,6 +6,9 @@ from fastapi import APIRouter, Body, Request
 
 from .domain import RehearsalRecord
 from .models import (
+    BackupEntryOut,
+    BackupsIn,
+    BackupsOut,
     LinkUsageOut,
     OrderStepOut,
     PendingOut,
@@ -92,6 +95,11 @@ def view(rehearsal_id: str, request: Request):
                 current_path=list(t.active_path),
                 initial_path=list(t.current_path),
                 target_path=list(t.target_path),
+                backup_path=(
+                    list(record.backups[t.tunnel_id])
+                    if t.tunnel_id in record.backups
+                    else None
+                ),
             )
             for t in record.tunnels
         ],
@@ -108,6 +116,39 @@ def view(rehearsal_id: str, request: Request):
             for link in record.links
         ],
         pending=pending,
+    )
+
+
+@router.put(
+    "/{rehearsal_id}/backups",
+    response_model=BackupsOut,
+    summary="Register backup paths for the whole rehearsal (empty body clears them)",
+    responses={
+        404: {"description": "Unknown rehearsal."},
+        409: {
+            "description": (
+                "The rehearsal's links lack endpoints, or a single-link outage "
+                "would strand a tunnel or overload a surviving link."
+            )
+        },
+        422: {"description": "The backup set is structurally invalid."},
+    },
+)
+def set_backups(
+    rehearsal_id: str,
+    request: Request,
+    body: BackupsIn | None = Body(default=None),
+):
+    entries = body.backups if body is not None else []
+    record = _engine(request).set_backups(rehearsal_id, entries)
+    return BackupsOut(
+        rehearsal_id=record.rehearsal_id,
+        status="completed" if record.completed else "active",
+        backups=[
+            BackupEntryOut(tunnel_id=t.tunnel_id, path=list(record.backups[t.tunnel_id]))
+            for t in record.tunnels
+            if t.tunnel_id in record.backups
+        ],
     )
 
 
@@ -146,7 +187,15 @@ def reserve(
     "/{rehearsal_id}/reservations/{reservation_id}/confirm",
     response_model=ResolutionOut,
     summary="Confirm a pending reservation: switch the path and free the old one",
-    responses={409: {"description": "Unknown, stale or non-pending reservation id."}},
+    responses={
+        409: {
+            "description": (
+                "Unknown, stale or non-pending reservation id; or the switch "
+                "would not survive a single-link outage with the registered "
+                "backups (the reservation stays pending and can be cancelled)."
+            )
+        }
+    },
 )
 def confirm(rehearsal_id: str, reservation_id: str, request: Request):
     engine = _engine(request)

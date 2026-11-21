@@ -83,6 +83,9 @@ class RehearsalRecord:
     order: tuple[str, ...]
     reservations: dict[str, ReservationRecord] = field(default_factory=dict)
     pending: str | None = None
+    # Registered backup path per tunnel id.  Replaced as a whole group; empty
+    # for rehearsals created before backups existed.
+    backups: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     # ------------------------------------------------------------- derived state
     def tunnel(self, tunnel_id: str) -> TunnelRecord | None:
@@ -148,6 +151,7 @@ class RehearsalRecord:
                 for t in self.tunnels
             ],
             "order": list(self.order),
+            "backups": {tid: list(path) for tid, path in self.backups.items()},
             "reservations": {
                 rid: {
                     "reservation_id": r.reservation_id,
@@ -180,6 +184,10 @@ class RehearsalRecord:
                 for t in doc["tunnels"]
             ),
             order=tuple(doc["order"]),
+            # Documents written before backups existed carry no such key.
+            backups={
+                tid: tuple(path) for tid, path in doc.get("backups", {}).items()
+            },
             reservations={
                 rid: ReservationRecord(
                     reservation_id=r["reservation_id"],

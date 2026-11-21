@@ -167,6 +167,61 @@ class ReserveIn(BaseModel):
     ]
 
 
+class BackupEntryIn(BaseModel):
+    """One tunnel's backup path: an ordered list of directed link ids."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    tunnel_id: Annotated[
+        str,
+        Field(
+            min_length=1,
+            validation_alias=AliasChoices("tunnel_id", "id", "tunnel"),
+            description="Tunnel this backup path belongs to.",
+        ),
+    ]
+    path: Annotated[
+        list[str],
+        Field(
+            min_length=1,
+            validation_alias=AliasChoices("path", "backup_path", "links", "route"),
+            description=(
+                "Ordered directed link ids forming a contiguous detour with the "
+                "same endpoints as the tunnel's live path."
+            ),
+        ),
+    ]
+
+
+class BackupsIn(BaseModel):
+    """Whole-group backup submission; an empty list clears every backup."""
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+        extra="ignore",
+        json_schema_extra={
+            "example": {
+                "backups": [
+                    {"tunnel_id": "T1", "path": ["L3"]},
+                    {"tunnel_id": "T2", "path": ["L1", "L2"]},
+                ]
+            }
+        },
+    )
+
+    backups: Annotated[
+        list[BackupEntryIn],
+        Field(
+            default_factory=list,
+            validation_alias=AliasChoices("backups", "backup_paths"),
+            description=(
+                "Replacement backup set for the rehearsal. Tunnels not listed "
+                "keep no backup; submit an empty list (or no body) to clear all."
+            ),
+        ),
+    ]
+
+
 # --------------------------------------------------------------------- outputs
 class OrderStepOut(BaseModel):
     sequence: int
@@ -191,6 +246,10 @@ class TunnelStatusOut(BaseModel):
     current_path: list[str] = Field(description="Path currently carrying traffic.")
     initial_path: list[str]
     target_path: list[str]
+    backup_path: list[str] | None = Field(
+        default=None,
+        description="Registered backup path, or null when none is registered.",
+    )
 
 
 class LinkUsageOut(BaseModel):
@@ -251,3 +310,16 @@ class ResolutionOut(BaseModel):
     )
     rehearsal_status: str
     next_tunnel_id: str | None
+
+
+class BackupEntryOut(BaseModel):
+    tunnel_id: str
+    path: list[str]
+
+
+class BackupsOut(BaseModel):
+    rehearsal_id: str
+    status: str
+    backups: list[BackupEntryOut] = Field(
+        description="Backup paths now registered, in rehearsal order."
+    )
